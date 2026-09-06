@@ -1,0 +1,22 @@
+services:
+  mongodb:
+    image: mongo:8
+    container_name: mini-kec-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: mini_kec
+    volumes:
+      - mongodb_data:/data/db
+
+  redis:
+    image: redis:8
+    container_name: mini-kec-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mongodb_data:
+  redis_data:
