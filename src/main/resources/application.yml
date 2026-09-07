@@ -2,10 +2,10 @@ spring:
   application:
     name: mini-kec
 
-  data:
-    mongodb:
-      uri: mongodb://localhost:27017/mini_kec
+  mongodb:
+    uri: mongodb://localhost:27017/mini_kec
 
+  data:
     redis:
       host: localhost
       port: 6379
