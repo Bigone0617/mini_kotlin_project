@@ -9,12 +9,14 @@ import com.example.minikec.user.application.port.output.UserRepositoryPort
 import com.example.minikec.user.domain.User
 import com.example.minikec.user.domain.UserPoint
 import org.springframework.stereotype.Service
+import java.time.Clock
 
 @Service
 class ParticipateEventService(
     private val eventRepositoryPort: EventRepositoryPort,
     private val userRepositoryPort: UserRepositoryPort,
-    private val userPointRepositoryPort: UserPointRepositoryPort
+    private val userPointRepositoryPort: UserPointRepositoryPort,
+    private val clock: Clock
 ) : ParticipateEventUseCase {
 
     override fun participate(
@@ -30,6 +32,8 @@ class ParticipateEventService(
         require(event.gameKey == command.gameKey) {
             "Game does not match event. gameKey=${command.gameKey}"
         }
+
+        event.validateAvailable(clock.instant())
 
         val existingUser =
             userRepositoryPort.findByExternalUserId(

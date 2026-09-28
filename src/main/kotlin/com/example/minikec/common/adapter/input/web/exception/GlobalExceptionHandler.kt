@@ -1,5 +1,6 @@
 package com.example.minikec.common.adapter.input.web.exception
 
+import com.example.minikec.event.domain.EventUnavailableException
 import com.example.minikec.user.domain.InsufficientPointException
 import com.example.minikec.action.domain.ActionRepeatNotAllowedException
 import com.example.minikec.action.domain.UserLockAcquisitionException
@@ -14,6 +15,17 @@ import org.springframework.web.bind.annotation.RestControllerAdvice
 
 @RestControllerAdvice
 class GlobalExceptionHandler {
+
+    @ExceptionHandler(EventUnavailableException::class)
+    fun handleEventUnavailable(exception: EventUnavailableException): ResponseEntity<ErrorResponse> {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(
+            ErrorResponse(
+                code = exception.reason.name,
+                message = exception.message ?: "Event is unavailable"
+            )
+        )
+    }
+
 
     @ExceptionHandler(ActionRepeatNotAllowedException::class)
     fun handleRepeatNotAllowed(

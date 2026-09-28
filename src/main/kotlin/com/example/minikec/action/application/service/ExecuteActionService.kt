@@ -25,6 +25,7 @@ import com.example.minikec.resource.domain.Resource
 
 import org.springframework.stereotype.Service
 import java.time.Instant
+import java.time.Clock
 
 @Service
 class ExecuteActionService(
@@ -34,7 +35,8 @@ class ExecuteActionService(
     private val userPointRepositoryPort: UserPointRepositoryPort,
     private val userLockPort: UserLockPort,
     private val rewardCounterPort: RewardCounterPort,
-    private val resourceRepositoryPort: ResourceRepositoryPort
+    private val resourceRepositoryPort: ResourceRepositoryPort,
+    private val clock: Clock
 ) : ExecuteActionUseCase {
 
     override fun execute(
@@ -57,6 +59,8 @@ class ExecuteActionService(
         require(event.gameKey == command.gameKey) {
             "Game key mismatch"
         }
+
+        event.validateAvailable(clock.instant())
 
         /*
          * 3. 이벤트에 참여한 User 조회
@@ -113,7 +117,9 @@ class ExecuteActionService(
             /*
             * 이번 Action 실행의 기준 시간
             */
-            val now = Instant.now()
+            val now = clock.instant()
+            // 락 대기 중 이벤트가 종료됐다면 저장이나 재고 확보 전에 거부한다.
+            event.validateAvailable(now)
 
             /*
             * 5. 가장 최근 UserAction 조회

@@ -22,6 +22,17 @@ data class Event(
     val miniGameGroups: List<ActionGroup> = emptyList()
 ) {
 
+    // 시작은 포함하고 종료는 제외한다. null은 해당 시간 제한이 없다는 뜻이다.
+    fun validateAvailable(now: Instant) {
+        val reason = when {
+            !active -> EventUnavailableReason.EVENT_INACTIVE
+            eventStartAt != null && now.isBefore(eventStartAt) -> EventUnavailableReason.EVENT_NOT_STARTED
+            eventEndAt != null && !now.isBefore(eventEndAt) -> EventUnavailableReason.EVENT_ENDED
+            else -> return
+        }
+        throw EventUnavailableException(reason, eventKey)
+    }
+
     fun findAction(actionId: String): Action {
         return allActions()
             .firstOrNull { it.actionId == actionId }
