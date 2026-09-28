@@ -8,6 +8,7 @@ import com.example.minikec.user.application.port.output.UserPointRepositoryPort
 import com.example.minikec.user.application.port.output.UserRepositoryPort
 import com.example.minikec.user.domain.User
 import com.example.minikec.user.domain.UserPoint
+import org.springframework.dao.DuplicateKeyException
 import org.springframework.stereotype.Service
 import java.time.Clock
 
@@ -50,14 +51,30 @@ class ParticipateEventService(
             )
         }
 
-        val user = userRepositoryPort.save(
-            User(
+        val user = try {
+            userRepositoryPort.save(
+                User(
+                    gameKey = command.gameKey,
+                    eventKey = command.eventKey,
+                    externalUserId = command.externalUserId,
+                    nickname = command.nickname
+                )
+            )
+        } catch (exception: DuplicateKeyException) {
+            // // 사전 조회 이후 다른 요청이 먼저 저장했으면 그 참여자를 반환한다.
+            // // 동일 참여자가 확인되지 않으면 정상 참여로 간주하지 않는다.
+            val concurrentUser = userRepositoryPort.findByExternalUserId(
                 gameKey = command.gameKey,
                 eventKey = command.eventKey,
-                externalUserId = command.externalUserId,
-                nickname = command.nickname
+                externalUserId = command.externalUserId
+            ) ?: throw exception
+
+            return ParticipateEventResult(
+                user = concurrentUser,
+                points = emptyList(),
+                alreadyParticipated = true
             )
-        )
+        }
 
         val userId = requireNotNull(user.id) {
             "Saved user must have an id"
