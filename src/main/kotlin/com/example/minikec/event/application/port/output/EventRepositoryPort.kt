@@ -6,6 +6,8 @@ interface EventRepositoryPort {
 
     fun save(event: Event): Event
 
+    fun findAll(): List<Event>
+
     fun findByEventKey(eventKey: String): Event?
 
     fun existsByEventKey(eventKey: String): Boolean

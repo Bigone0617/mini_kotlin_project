@@ -29,12 +29,16 @@ data class UserPoint(
 
     fun spend(amount: Long): UserPoint {
 
-        require(amount > 0) {
-            "Spend amount must be greater than 0"
+         require(amount > 0) {
+            "Spend amount must be positive"
         }
 
-        require(currentPoint >= amount) {
-            "Not enough points"
+        if (currentPoint < amount) {
+            throw InsufficientPointException(
+                pointKey = pointKey,
+                required = amount,
+                current = currentPoint
+            )
         }
 
         return copy(

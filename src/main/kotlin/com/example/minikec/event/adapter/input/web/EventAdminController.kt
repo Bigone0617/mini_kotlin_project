@@ -18,6 +18,13 @@ class EventAdminController(
     private val getEventUseCase: GetEventUseCase
 ) {
 
+    @GetMapping
+    fun getEvents(): List<EventResponse> {
+        return getEventUseCase
+            .getAll()
+            .map(EventResponse::from)
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     fun createEvent(

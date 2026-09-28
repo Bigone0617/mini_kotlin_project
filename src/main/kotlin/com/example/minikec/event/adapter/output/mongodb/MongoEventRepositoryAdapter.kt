@@ -17,6 +17,12 @@ class MongoEventRepositoryAdapter(
             .toDomain()
     }
 
+    override fun findAll(): List<Event> {
+        return repository
+            .findAll()
+            .map { it.toDomain() }
+    }
+
     override fun findByEventKey(eventKey: String): Event? {
         return repository
             .findByEventKey(eventKey)

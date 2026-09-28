@@ -10,6 +10,10 @@ class GetEventService(
     private val eventRepositoryPort: EventRepositoryPort
 ) : GetEventUseCase {
 
+    override fun getAll(): List<Event> {
+        return eventRepositoryPort.findAll()
+    }
+
     override fun getByEventKey(eventKey: String): Event {
         return eventRepositoryPort.findByEventKey(eventKey)
             ?: throw IllegalArgumentException(
