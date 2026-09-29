@@ -2,6 +2,9 @@ package com.example.minikec.user
 
 import com.example.minikec.user.adapter.output.mongodb.*
 import com.example.minikec.user.domain.User
+import com.example.minikec.user.domain.UserPoint
+import com.example.minikec.user.application.port.output.UserPointRepositoryPort
+import com.mongodb.MongoException
 import com.example.minikec.event.application.port.output.EventRepositoryPort
 import com.example.minikec.event.domain.Event
 import com.example.minikec.event.domain.PointDefinition
@@ -34,6 +37,7 @@ class MongoUserUniqueIndexTest {
     private val dbName = "mini_kec_index_test_" + UUID.randomUUID().toString().replace("-", "")
     private val template = MongoTemplate(client, dbName)
     private val names = DynamicCollectionNameProvider()
+    private val unitOfWork = MongoParticipationUnitOfWork(template, names)
     private val adapter = MongoUserRepositoryAdapter(template, names)
     private val user = User(gameKey = "game", eventKey = "event", externalUserId = "external")
     private val collection = names.user("game", "event")
@@ -43,6 +47,7 @@ class MongoUserUniqueIndexTest {
     }
 
     @Test fun `index blocks duplicate identity and allows updating same document`() {
+        unitOfWork.prepare("game", "event")
         val saved = adapter.save(user)
         assertThrows(DuplicateKeyException::class.java) { adapter.save(user) }
         adapter.save(saved.copy(nickname = "updated"))
@@ -53,6 +58,7 @@ class MongoUserUniqueIndexTest {
     }
 
     @Test fun `same external identity is allowed in different events and games`() {
+        for ((g, e) in listOf("game" to "event", "game" to "other-event", "other-game" to "event")) unitOfWork.prepare(g, e)
         adapter.save(user)
         adapter.save(user.copy(eventKey = "other-event"))
         adapter.save(user.copy(gameKey = "other-game"))
@@ -62,6 +68,7 @@ class MongoUserUniqueIndexTest {
     }
 
     @Test fun `concurrent first saves allow exactly one participant`() {
+        unitOfWork.prepare("game", "event")
         val workers = 8
         val barrier = CyclicBarrier(workers)
         val pool = Executors.newFixedThreadPool(workers)
@@ -108,7 +115,7 @@ class MongoUserUniqueIndexTest {
             points = listOf(PointDefinition("ticket", "ticket", initialPoint = 10))
         ))
         val pointAdapter = MongoUserPointRepositoryAdapter(template, names)
-        val service = ParticipateEventService(events, racingUsers, pointAdapter, Clock.systemUTC())
+        val service = ParticipateEventService(events, racingUsers, pointAdapter, Clock.systemUTC(), unitOfWork)
         val command = ParticipateEventCommand("game", "event", "external", "participant")
         val pool = Executors.newFixedThreadPool(workers)
         try {
@@ -136,25 +143,126 @@ class MongoUserUniqueIndexTest {
             assertEquals(workers - 1, duplicateSaves.get())
             println("duplicateSaves: $duplicateSaves")
             
-            assertTrue(results.filter { it.alreadyParticipated }.all { it.points.isEmpty() })
+            assertTrue(results.filter { it.alreadyParticipated }.all { it.points.size == 1 })
             println("results: ${results.filter { it.alreadyParticipated }.map { it.points }}")
 
             assertEquals(1L, template.getCollection(names.userPoint("game", "event")).countDocuments())
             val point = requireNotNull(pointAdapter.findByUserIdAndPointKey("game", "event", userId, "ticket"))
             assertEquals(10L, point.totalPoint)
             assertEquals(10L, point.currentPoint)
-            assertEquals(listOf(point), results.single { !it.alreadyParticipated }.points)
+            assertTrue(results.all { it.points == listOf(point) })
         } finally {
             pool.shutdownNow()
             check(pool.awaitTermination(20, TimeUnit.SECONDS)) { "Participation workers did not stop" }
         }
     }
 
+    @Test fun `second point failure rolls back user and first point and allows retry`() {
+        val events = mock(EventRepositoryPort::class.java)
+        `when`(events.findByEventKey("event")).thenReturn(Event(
+            eventKey = "event", gameKey = "game", name = "rollback", active = true,
+            points = listOf(PointDefinition("first", "first", 10), PointDefinition("second", "second", 20))
+        ))
+        val realPoints = MongoUserPointRepositoryAdapter(template, names)
+        val failure = IllegalStateException("second point failed")
+        val failingPoints = object : UserPointRepositoryPort by realPoints {
+            override fun save(gameKey: String, userPoint: UserPoint): UserPoint {
+                if (userPoint.pointKey == "second") throw failure
+                return realPoints.save(gameKey, userPoint)
+            }
+        }
+        val command = ParticipateEventCommand("game", "event", "external", null)
+        val failingService = ParticipateEventService(events, adapter, failingPoints, Clock.systemUTC(), unitOfWork)
+        assertSame(failure, assertThrows(IllegalStateException::class.java) { failingService.participate(command) })
+        assertEquals(0L, template.getCollection(collection).countDocuments())
+        assertEquals(0L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+
+        val service = ParticipateEventService(events, adapter, realPoints, Clock.systemUTC(), unitOfWork)
+        val result = service.participate(command)
+        assertFalse(result.alreadyParticipated)
+        assertEquals(listOf(10L, 20L), result.points.map { it.currentPoint })
+        assertEquals(1L, template.getCollection(collection).countDocuments())
+        assertEquals(2L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+        assertTrue(service.participate(command).alreadyParticipated)
+        assertEquals(2L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+    }
+
+    @Test fun `repeat participation returns stored balances only for requested user and event`() {
+        val events = mock(EventRepositoryPort::class.java)
+        `when`(events.findByEventKey("event")).thenReturn(Event(
+            eventKey = "event", gameKey = "game", name = "balances", active = true,
+            points = listOf(PointDefinition("ticket", "ticket", 10), PointDefinition("coin", "coin", 20))
+        ))
+        val pointAdapter = MongoUserPointRepositoryAdapter(template, names)
+        val service = ParticipateEventService(events, adapter, pointAdapter, Clock.systemUTC(), unitOfWork)
+        val command = ParticipateEventCommand("game", "event", "external", null)
+        val created = service.participate(command)
+        val id = requireNotNull(created.user.id)
+        val updated = pointAdapter.save("game", created.points.first { it.pointKey == "ticket" }.copy(totalPoint = 30, currentPoint = 7))
+        pointAdapter.save("game", UserPoint(eventKey = "event", userId = "other-user", pointKey = "ticket", currentPoint = 999))
+        pointAdapter.save("game", UserPoint(eventKey = "other-event", userId = id, pointKey = "ticket", currentPoint = 999))
+        pointAdapter.save("other-game", UserPoint(eventKey = "event", userId = id, pointKey = "ticket", currentPoint = 999))
+
+        val result = service.participate(command)
+        assertTrue(result.alreadyParticipated)
+        assertEquals(listOf("coin", "ticket"), result.points.map { it.pointKey })
+        assertEquals(updated, result.points.single { it.pointKey == "ticket" })
+        assertEquals(20L, result.points.single { it.pointKey == "coin" }.currentPoint)
+        assertEquals(1L, template.getCollection(collection).countDocuments())
+        assertEquals(3L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+    }
+
+    @Test fun `transient transaction error retries after rollback`() {
+        unitOfWork.prepare("game", "event")
+        var attempts = 0
+        val result = unitOfWork.execute {
+            val saved = adapter.save(user)
+            if (++attempts == 1) {
+                throw MongoException(112, "simulated write conflict").apply {
+                    addLabel("TransientTransactionError")
+                }
+            }
+            saved
+        }
+        assertEquals(2, attempts)
+        assertEquals(result.id, adapter.findByExternalUserId("game", "event", "external")!!.id)
+        assertEquals(1L, template.getCollection(collection).countDocuments())
+    }
+
+    @Test fun `transient retries are bounded`() {
+        unitOfWork.prepare("game", "event")
+        var attempts = 0
+        assertThrows(MongoException::class.java) {
+            unitOfWork.execute {
+                adapter.save(user)
+                attempts++
+                throw MongoException(112, "persistent conflict").apply { addLabel("TransientTransactionError") }
+            }
+        }
+        assertEquals(5, attempts)
+        assertEquals(0L, template.getCollection(collection).countDocuments())
+    }
+
+    @Test fun `unknown commit label does not replay work`() {
+        var attempts = 0
+        assertThrows(MongoException::class.java) {
+            unitOfWork.execute {
+                attempts++
+                // 라벨 분기만 검증한다. 실제 네트워크 커밋 장애를 재현하는 테스트는 아니다.
+                throw MongoException(91, "unknown result").apply {
+                    addLabel("TransientTransactionError")
+                    addLabel("UnknownTransactionCommitResult")
+                }
+            }
+        }
+        assertEquals(1, attempts)
+    }
+
     @Test fun `existing duplicate data prevents index creation and new writes`() {
         template.getCollection(collection).insertMany(listOf(
             Document("externalUserId", "duplicate"), Document("externalUserId", "duplicate")
         ))
-        assertThrows(DataAccessException::class.java) { adapter.save(user) }
+        assertThrows(DataAccessException::class.java) { unitOfWork.prepare("game", "event") }
         assertEquals(2L, template.getCollection(collection).countDocuments())
         assertEquals(0L, template.getCollection(collection).countDocuments(Document("externalUserId", "external")))
     }

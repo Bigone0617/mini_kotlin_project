@@ -3,7 +3,7 @@ spring:
     name: mini-kec
 
   mongodb:
-    uri: mongodb://localhost:27017/mini_kec
+    uri: mongodb://localhost:27017/mini_kec?replicaSet=rs0
 
   data:
     redis:

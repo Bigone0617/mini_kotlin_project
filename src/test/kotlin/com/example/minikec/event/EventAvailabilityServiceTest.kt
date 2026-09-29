@@ -38,7 +38,7 @@ class EventAvailabilityServiceTest {
     @ParameterizedTest @EnumSource(EventUnavailableReason::class)
     fun `participation rejection performs no user or point operations`(reason: EventUnavailableReason) {
         `when`(events.findByEventKey("e")).thenReturn(event(reason))
-        val service = ParticipateEventService(events, users, points, clock)
+        val service = ParticipateEventService(events, users, points, clock, com.example.minikec.user.DirectParticipationUnitOfWork)
         val error = assertThrows(EventUnavailableException::class.java) {
             service.participate(ParticipateEventCommand("g", "e", "external", null))
         }
@@ -58,10 +58,11 @@ class EventAvailabilityServiceTest {
     @Test fun `existing participant can participate at start`() {
         `when`(events.findByEventKey("e")).thenReturn(Event("e", "g", "test", active = true, eventStartAt = now))
         `when`(users.findByExternalUserId("g", "e", "external")).thenReturn(User("u", "e", "g", "external"))
-        val result = ParticipateEventService(events, users, points, clock)
+        val result = ParticipateEventService(events, users, points, clock, com.example.minikec.user.DirectParticipationUnitOfWork)
             .participate(ParticipateEventCommand("g", "e", "external", null))
         assertTrue(result.alreadyParticipated)
-        verifyNoInteractions(points)
+        verify(points).findAllByUserId("g", "e", "u")
+        verifyNoMoreInteractions(points)
     }
     @Test fun `event ending while waiting for lock is rejected before writes`() {
         val action = Action("a", "test", ActionType.MISSION, ActionSubType.VISIT)

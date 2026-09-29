@@ -9,6 +9,12 @@ interface UserPointRepositoryPort {
         userPoint: UserPoint
     ): UserPoint
 
+    fun findAllByUserId(
+        gameKey: String,
+        eventKey: String,
+        userId: String
+    ): List<UserPoint>
+
     fun findByUserIdAndPointKey(
         gameKey: String,
         eventKey: String,

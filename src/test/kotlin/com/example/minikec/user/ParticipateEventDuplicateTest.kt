@@ -42,18 +42,45 @@ class ParticipateEventDuplicateTest {
             "e", "g", "event", active = true,
             points = listOf(PointDefinition("p", "point", initialPoint = 10))
         ))
-        return ParticipateEventService(events, users, points, Clock.systemUTC())
+        return ParticipateEventService(events, users, points, Clock.systemUTC(), DirectParticipationUnitOfWork)
     }
 
     @Test fun `duplicate save returns winning participant without initializing points again`() {
         val users = RacingUsers(saved, DuplicateKeyException("duplicate"))
+        val currentPoints = listOf(UserPoint(eventKey = "e", userId = "winner", pointKey = "p", totalPoint = 30, currentPoint = 7))
+        `when`(points.findAllByUserId("g", "e", "winner")).thenReturn(currentPoints)
         val result = service(users).participate(command)
         assertEquals(saved, result.user)
         assertTrue(result.alreadyParticipated)
-        assertTrue(result.points.isEmpty())
+        assertEquals(currentPoints, result.points)
         assertEquals(2, users.reads)
         assertEquals(1, users.writes)
-        verifyNoInteractions(points)
+        verify(points).findAllByUserId("g", "e", "winner")
+        verifyNoMoreInteractions(points)
+    }
+
+    @Test fun `existing participant returns current points without writes or transaction`() {
+        val users = mock(UserRepositoryPort::class.java)
+        `when`(users.findByExternalUserId("g", "e", "external")).thenReturn(saved)
+        val currentPoints = listOf(UserPoint(eventKey = "e", userId = "winner", pointKey = "p", totalPoint = 30, currentPoint = 7))
+        `when`(points.findAllByUserId("g", "e", "winner")).thenReturn(currentPoints)
+        val result = service(users).participate(command)
+        assertTrue(result.alreadyParticipated)
+        assertEquals(currentPoints, result.points)
+        verify(users).findByExternalUserId("g", "e", "external")
+        verify(points).findAllByUserId("g", "e", "winner")
+        verifyNoMoreInteractions(users, points)
+    }
+
+    @Test fun `missing points remain empty without initialization`() {
+        val users = mock(UserRepositoryPort::class.java)
+        `when`(users.findByExternalUserId("g", "e", "external")).thenReturn(saved)
+        `when`(points.findAllByUserId("g", "e", "winner")).thenReturn(emptyList())
+        val result = service(users).participate(command)
+        assertTrue(result.alreadyParticipated)
+        assertTrue(result.points.isEmpty())
+        verify(points).findAllByUserId("g", "e", "winner")
+        verifyNoMoreInteractions(points)
     }
 
     @Test fun `duplicate without matching participant preserves original failure`() {

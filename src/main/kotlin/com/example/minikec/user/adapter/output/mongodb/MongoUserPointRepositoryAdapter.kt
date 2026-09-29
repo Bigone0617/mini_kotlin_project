@@ -5,6 +5,7 @@ import com.example.minikec.user.domain.UserPoint
 import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
+import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Component
 
 @Component
@@ -30,6 +31,19 @@ class MongoUserPointRepositoryAdapter(
         )
 
         return saved.toDomain()
+    }
+
+    override fun findAllByUserId(
+        gameKey: String,
+        eventKey: String,
+        userId: String
+    ): List<UserPoint> {
+        val collectionName = collectionNameProvider.userPoint(gameKey, eventKey)
+        val query = Query.query(Criteria.where("userId").`is`(userId))
+            .with(Sort.by(Sort.Direction.ASC, "pointKey"))
+
+        return mongoTemplate.find(query, UserPointDocument::class.java, collectionName)
+            .map { it.toDomain() }
     }
 
     override fun findByUserIdAndPointKey(
