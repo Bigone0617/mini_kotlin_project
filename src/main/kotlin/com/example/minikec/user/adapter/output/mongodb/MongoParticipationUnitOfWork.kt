@@ -24,9 +24,10 @@ class MongoParticipationUnitOfWork(
         template.indexOps(names.user(gameKey, eventKey)).createIndex(
             Index().on("externalUserId", Sort.Direction.ASC).unique()
         )
-        // 인덱스 생성은 포인트 컬렉션도 미리 준비한다.
+        // 사용자별 같은 포인트는 한 문서만 허용한다. 기존 일반 인덱스와 이름을 구분한다.
         template.indexOps(names.userPoint(gameKey, eventKey)).createIndex(
             Index().on("userId", Sort.Direction.ASC).on("pointKey", Sort.Direction.ASC)
+                .unique().named("uk_userId_pointKey")
         )
     }
 

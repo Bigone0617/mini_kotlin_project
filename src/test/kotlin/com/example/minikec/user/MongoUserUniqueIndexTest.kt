@@ -212,6 +212,86 @@ class MongoUserUniqueIndexTest {
         assertEquals(3L, template.getCollection(names.userPoint("game", "event")).countDocuments())
     }
 
+    @Test fun `point unique index blocks duplicate pair but allows updates and different identities`() {
+        for ((g, e) in listOf("game" to "event", "game" to "other-event", "other-game" to "event")) unitOfWork.prepare(g, e)
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        val point = UserPoint(eventKey = "event", userId = "u", pointKey = "ticket", totalPoint = 10, currentPoint = 10)
+        val saved = points.save("game", point)
+        assertThrows(DuplicateKeyException::class.java) { points.save("game", point) }
+        val updated = points.save("game", saved.copy(currentPoint = 7))
+        assertEquals(7L, updated.currentPoint)
+        points.save("game", point.copy(userId = "other-user"))
+        points.save("game", point.copy(pointKey = "coin"))
+        points.save("game", point.copy(eventKey = "other-event"))
+        points.save("other-game", point)
+        assertEquals(3L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+        assertEquals(saved.id, points.findByUserIdAndPointKey("game", "event", "u", "ticket")!!.id)
+        val index = template.getCollection(names.userPoint("game", "event")).listIndexes()
+            .first { it.getString("name") == "uk_userId_pointKey" }
+        assertTrue(index.getBoolean("unique"))
+        assertEquals(Document("userId", 1).append("pointKey", 1), index["key"])
+    }
+
+    @Test fun `concurrent point inserts create exactly one document`() {
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        val barrier = CyclicBarrier(8)
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            val futures = (1..8).map {
+                pool.submit(Callable {
+                    barrier.await(20, TimeUnit.SECONDS)
+                    try {
+                        points.save("game", UserPoint(eventKey = "event", userId = "u", pointKey = "ticket"))
+                        true
+                    } catch (exception: DuplicateKeyException) { false }
+                })
+            }
+            assertEquals(1, futures.count { it.get(40, TimeUnit.SECONDS) })
+            assertEquals(1L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+        } finally {
+            pool.shutdownNow()
+            check(pool.awaitTermination(20, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun `prepare adds unique point index alongside legacy regular index and is repeatable`() {
+        val collection = template.getCollection(names.userPoint("game", "event"))
+        collection.createIndex(Document("userId", 1).append("pointKey", 1))
+        unitOfWork.prepare("game", "event")
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        val point = UserPoint(eventKey = "event", userId = "u", pointKey = "ticket")
+        points.save("game", point)
+        assertThrows(DuplicateKeyException::class.java) { points.save("game", point) }
+    }
+
+    @Test fun `legacy duplicate points prevent preparation without deleting balances`() {
+        val collection = template.getCollection(names.userPoint("game", "event"))
+        collection.insertMany(listOf(
+            Document("userId", "u").append("pointKey", "ticket").append("currentPoint", 10),
+            Document("userId", "u").append("pointKey", "ticket").append("currentPoint", 20)
+        ))
+        assertThrows(DataAccessException::class.java) { unitOfWork.prepare("game", "event") }
+        assertEquals(2L, collection.countDocuments())
+        assertEquals(setOf(10, 20), collection.find().map { it.getInteger("currentPoint") }.toList().toSet())
+    }
+
+    @Test fun `duplicate event point definitions roll back participation`() {
+        val events = mock(EventRepositoryPort::class.java)
+        `when`(events.findByEventKey("event")).thenReturn(Event(
+            eventKey = "event", gameKey = "game", name = "duplicate points", active = true,
+            points = listOf(PointDefinition("ticket", "first", 10), PointDefinition("ticket", "second", 20))
+        ))
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        val service = ParticipateEventService(events, adapter, points, Clock.systemUTC(), unitOfWork)
+        assertThrows(DuplicateKeyException::class.java) {
+            service.participate(ParticipateEventCommand("game", "event", "external", null))
+        }
+        assertEquals(0L, template.getCollection(collection).countDocuments())
+        assertEquals(0L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+    }
+
     @Test fun `transient transaction error retries after rollback`() {
         unitOfWork.prepare("game", "event")
         var attempts = 0
