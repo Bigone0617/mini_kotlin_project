@@ -15,6 +15,7 @@ import com.example.minikec.user.application.port.output.UserRepositoryPort
 import com.example.minikec.user.domain.ActionSnapshot
 import com.example.minikec.user.domain.ActionStatus
 import com.example.minikec.user.domain.UserAction
+import com.example.minikec.user.domain.InsufficientPointException
 import com.example.minikec.user.domain.UserPoint
 import com.example.minikec.action.application.port.output.UserLockPort
 import com.example.minikec.action.application.port.output.RewardCounterPort
@@ -256,37 +257,12 @@ class ExecuteActionService(
 
                 action.pointRewards.map { reward ->
 
-                    /*
-                     * 현재 UserPoint 조회
-                     */
-                    val currentPoint =
-                        userPointRepositoryPort
-                            .findByUserIdAndPointKey(
-                                gameKey = command.gameKey,
-                                eventKey = command.eventKey,
-                                userId = userId,
-                                pointKey = reward.pointKey
-                            )
-                            ?: UserPoint(
-                                eventKey = command.eventKey,
-                                userId = userId,
-                                pointKey = reward.pointKey
-                            )
-
-                    /*
-                     * Point 증가
-                     */
-                    val updated =
-                        currentPoint.earn(
-                            reward.amount
-                        )
-
-                    /*
-                     * 증가한 Point 저장
-                     */
-                    userPointRepositoryPort.save(
-                        command.gameKey,
-                        updated
+                    userPointRepositoryPort.earn(
+                        gameKey = command.gameKey,
+                        eventKey = command.eventKey,
+                        userId = userId,
+                        pointKey = reward.pointKey,
+                        amount = reward.amount
                     )
                 }
 
@@ -368,8 +344,7 @@ class ExecuteActionService(
         * spend()는 새로운 UserPoint 객체를 반환할 뿐
         * 아직 MongoDB에는 저장하지 않는다.
         */
-        val updatedPoint =
-            currentPoint.spend(
+        currentPoint.spend(
                 pointCost
             )
             
@@ -469,9 +444,18 @@ class ExecuteActionService(
             /*
             * 9. Point 차감 저장
             */
-            userPointRepositoryPort.save(
-                command.gameKey,
-                updatedPoint
+            val updatedPoint = userPointRepositoryPort.spendIfEnough(
+                gameKey = command.gameKey,
+                eventKey = command.eventKey,
+                userId = userId,
+                pointKey = pointDefinition.pointKey,
+                amount = pointCost
+            ) ?: throw InsufficientPointException(
+                pointKey = pointDefinition.pointKey,
+                required = pointCost,
+                current = userPointRepositoryPort.findByUserIdAndPointKey(
+                    command.gameKey, command.eventKey, userId, pointDefinition.pointKey
+                )?.currentPoint ?: 0
             )
             
             println("REWARD STEP 5: point saved")

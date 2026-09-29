@@ -292,6 +292,75 @@ class MongoUserUniqueIndexTest {
         assertEquals(0L, template.getCollection(names.userPoint("game", "event")).countDocuments())
     }
 
+    @Test fun `concurrent spending cannot exceed available balance`() {
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        points.save("game", UserPoint(eventKey = "event", userId = "u", pointKey = "ticket", totalPoint = 10, currentPoint = 10))
+        val results = concurrentPoints(8) { points.spendIfEnough("game", "event", "u", "ticket", 3) }
+        assertEquals(3, results.count { it != null })
+        assertEquals(5, results.count { it == null })
+        val balance = points.findByUserIdAndPointKey("game", "event", "u", "ticket")!!
+        assertEquals(1L, balance.currentPoint)
+        assertEquals(10L, balance.totalPoint)
+        assertEquals(1L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+    }
+
+    @Test fun `missing insufficient and invalid debits never change balances`() {
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        assertNull(points.spendIfEnough("game", "event", "u", "ticket", 1))
+        assertEquals(0L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+        points.earn("game", "event", "u", "ticket", 5)
+        assertNull(points.spendIfEnough("game", "event", "u", "ticket", 6))
+        assertNull(points.spendIfEnough("game", "event", "other", "ticket", 1))
+        assertNull(points.spendIfEnough("other-game", "event", "u", "ticket", 1))
+        assertNull(points.spendIfEnough("game", "other-event", "u", "ticket", 1))
+        for (amount in listOf(0L, -1L)) {
+            assertThrows(IllegalArgumentException::class.java) { points.spendIfEnough("game", "event", "u", "ticket", amount) }
+            assertThrows(IllegalArgumentException::class.java) { points.earn("game", "event", "u", "ticket", amount) }
+        }
+        assertEquals(5L, points.findByUserIdAndPointKey("game", "event", "u", "ticket")!!.currentPoint)
+        assertEquals(0L, points.spendIfEnough("game", "event", "u", "ticket", 5)!!.currentPoint)
+    }
+
+    @Test fun `concurrent initial earnings keep every increment in one document`() {
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        concurrentPoints(8) { points.earn("game", "event", "u", "ticket", 2) }
+        val balance = points.findByUserIdAndPointKey("game", "event", "u", "ticket")!!
+        assertEquals(16L, balance.currentPoint)
+        assertEquals(16L, balance.totalPoint)
+        assertEquals(1L, template.getCollection(names.userPoint("game", "event")).countDocuments())
+    }
+
+    @Test fun `concurrent earnings and spending do not overwrite each other`() {
+        unitOfWork.prepare("game", "event")
+        val points = MongoUserPointRepositoryAdapter(template, names)
+        points.earn("game", "event", "u", "ticket", 100)
+        val calls = AtomicInteger()
+        concurrentPoints(8) {
+            if (calls.incrementAndGet() % 2 == 0) points.earn("game", "event", "u", "ticket", 5)
+            else requireNotNull(points.spendIfEnough("game", "event", "u", "ticket", 3))
+        }
+        val balance = points.findByUserIdAndPointKey("game", "event", "u", "ticket")!!
+        assertEquals(108L, balance.currentPoint)
+        assertEquals(120L, balance.totalPoint)
+    }
+
+    private fun <T> concurrentPoints(workers: Int, action: () -> T): List<T> {
+        val barrier = CyclicBarrier(workers)
+        val pool = Executors.newFixedThreadPool(workers)
+        try {
+            val tasks = (1..workers).map {
+                pool.submit(Callable { barrier.await(20, TimeUnit.SECONDS); action() })
+            }
+            return tasks.map { it.get(40, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+            check(pool.awaitTermination(20, TimeUnit.SECONDS))
+        }
+    }
+
     @Test fun `transient transaction error retries after rollback`() {
         unitOfWork.prepare("game", "event")
         var attempts = 0
