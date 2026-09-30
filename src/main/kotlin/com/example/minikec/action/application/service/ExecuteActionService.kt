@@ -22,7 +22,10 @@ import com.example.minikec.action.application.port.output.RewardCounterPort
 import com.example.minikec.action.domain.RewardSoldOutException
 import com.example.minikec.resource.application.port.output.ResourceRepositoryPort
 import com.example.minikec.resource.domain.ResourceNotAvailableException
-import com.example.minikec.resource.domain.Resource
+import com.example.minikec.action.application.port.output.MissionUnitOfWork
+import com.example.minikec.action.application.port.output.RewardUnitOfWork
+import com.example.minikec.action.domain.RewardCommitUncertainException
+import org.slf4j.LoggerFactory
 
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -37,8 +40,11 @@ class ExecuteActionService(
     private val userLockPort: UserLockPort,
     private val rewardCounterPort: RewardCounterPort,
     private val resourceRepositoryPort: ResourceRepositoryPort,
-    private val clock: Clock
+    private val clock: Clock,
+    private val rewardUnitOfWork: RewardUnitOfWork,
+    private val missionUnitOfWork: MissionUnitOfWork
 ) : ExecuteActionUseCase {
+    private val logger = LoggerFactory.getLogger(javaClass)
 
     override fun execute(
         command: ExecuteActionCommand
@@ -160,13 +166,17 @@ class ExecuteActionService(
             when (action.actionType) {
 
                 ActionType.MISSION -> {
-                    executeMission(
-                        command = command,
-                        action = action,
-                        userId = userId,
-                        latestUserAction = latestUserAction,
-                        now = now
-                    )
+                    missionUnitOfWork.prepare(command.gameKey, command.eventKey)
+                    missionUnitOfWork.execute {
+                        // 재시도마다 새 시각과 DB 상태를 기준으로 판단한다.
+                        val missionNow = clock.instant()
+                        event.validateAvailable(missionNow)
+                        val latest = userActionRepositoryPort.findLatestByUserIdAndActionId(
+                            command.gameKey, command.eventKey, userId, action.actionId
+                        )
+                        ActionRepeatPolicy.validate(action, latest, missionNow)
+                        executeMission(command, action, userId, latest, missionNow)
+                    }
                 }
 
                 ActionType.REWARD -> {
@@ -174,8 +184,7 @@ class ExecuteActionService(
                         command = command,
                         event = event,
                         action = action,
-                        userId = userId,
-                        now = now
+                        userId = userId
                     )
                 }
 
@@ -280,246 +289,79 @@ class ExecuteActionService(
     }
 
     /*
-     * REWARD Action 실행
-     *
-     * 현재 Step 9에서는:
-     *
-     * coupon-reward.goal = 30
-     *
-     * 즉,
-     * 30 Point가 있어야 Reward 실행 가능
-     *
-     * 아직 실제 Coupon 지급은 하지 않고
-     * Point 차감 + Reward COMPLETE까지만 구현
+     * Redis 수량 확보는 한 번만 수행한다.
+     * 자원 할당 + 포인트 차감 + 완료 기록은 MongoDB 트랜잭션으로 묶는다.
      */
-   private fun executeReward(
-    command: ExecuteActionCommand,
-    event: Event,
-    action: Action,
-    userId: String,
-    now: Instant
+    private fun executeReward(
+        command: ExecuteActionCommand,
+        event: Event,
+        action: Action,
+        userId: String
     ): ExecuteActionResult {
+        val pointCost = action.goal
+            ?: throw IllegalStateException("Reward point cost is missing: ${action.actionId}")
+        val pointDefinition = event.points.singleOrNull()
+            ?: throw IllegalStateException("Step 12 supports exactly one point type")
+        val currentPoint = userPointRepositoryPort.findByUserIdAndPointKey(
+            command.gameKey, command.eventKey, userId, pointDefinition.pointKey
+        ) ?: UserPoint(eventKey = command.eventKey, userId = userId, pointKey = pointDefinition.pointKey)
+        // 빠른 거절을 위한 사전 검사. 최종 판단은 트랜잭션 안의 조건부 차감이 수행한다.
+        currentPoint.spend(pointCost)
+        val itemReward = action.itemRewards.singleOrNull()
+            ?: throw IllegalStateException("Step 12 supports exactly one reward item")
+        check(itemReward.quantity == 1L) { "Step 12 supports reward item quantity = 1 only" }
 
-        /*
-        * 1. Reward를 받기 위해 필요한 Point
-        *
-        * 현재 mini-kec에서는
-        * action.goal을 Reward 필요 Point로 사용
-        */
-        val pointCost =
-            action.goal
-                ?: throw IllegalStateException(
-                    "Reward point cost is missing: ${action.actionId}"
-                )
-
-        /*
-        * 2. 현재 Step에서는 Point 종류 하나만 지원
-        */
-        val pointDefinition =
-            event.points.singleOrNull()
-                ?: throw IllegalStateException(
-                    "Step 12 supports exactly one point type"
-                )
-
-        /*
-        * 3. 현재 UserPoint 조회
-        */
-        val currentPoint =
-            userPointRepositoryPort
-                .findByUserIdAndPointKey(
-                    gameKey = command.gameKey,
-                    eventKey = command.eventKey,
-                    userId = userId,
-                    pointKey = pointDefinition.pointKey
-                )
-                ?: UserPoint(
-                    eventKey = command.eventKey,
-                    userId = userId,
-                    pointKey = pointDefinition.pointKey
-                )
-
-        /*
-        * 4. Point가 충분한지 확인
-        *
-        * spend()는 새로운 UserPoint 객체를 반환할 뿐
-        * 아직 MongoDB에는 저장하지 않는다.
-        */
-        currentPoint.spend(
-                pointCost
-            )
-            
-        println("===== REWARD ITEM DEBUG =====")
-        println("actionId = ${action.actionId}")
-        println("itemRewards size = ${action.itemRewards.size}")
-        println("itemRewards = ${action.itemRewards}")
-        println("=============================")
-
-        /*
-        * 5. Reward Item 확인
-        *
-        * Step 12에서는
-        * Item 1종 + quantity 1만 지원
-        */
-        val itemReward =
-            action.itemRewards.singleOrNull()
-                ?: throw IllegalStateException(
-                    "Step 12 supports exactly one reward item"
-                )
-
-        if (itemReward.quantity != 1L) {
-            throw IllegalStateException(
-                "Step 12 supports reward item quantity = 1 only"
-            )
-        }
-
-        /*
-        * 6. 전체 Reward 최대 수량
-        */
-        val maxCount =
-            action.totalCount
-
-        val counterKey =
-            "reward-count:${command.gameKey}:${command.eventKey}:${action.actionId}"
-
-        /*
-        * 이후 실패 시 compensation을 하기 위한 상태값
-        */
+        rewardUnitOfWork.prepare(command.gameKey, command.eventKey)
+        val counterKey = "reward-count:${command.gameKey}:${command.eventKey}:${action.actionId}"
         var counterAcquired = false
-        var assignedResource: Resource? = null
-
         try {
-            
-            println("REWARD STEP 1: point checked")
-
-            println("REWARD STEP 2: counter acquire start")
-
-            /*
-            * 7. Atomic Counter 자리 확보
-            *
-            * totalCount가 null이면
-            * 전체 수량 제한이 없는 Reward
-            */
-            if (maxCount != null) {
-
-                counterAcquired =
-                    rewardCounterPort.tryAcquire(
-                        key = counterKey,
-                        maxCount = maxCount
-                    )
-
-                if (!counterAcquired) {
-                    throw RewardSoldOutException(
-                        action.actionId
-                    )
-                }
+            action.totalCount?.let { maxCount ->
+                counterAcquired = rewardCounterPort.tryAcquire(counterKey, maxCount)
+                if (!counterAcquired) throw RewardSoldOutException(action.actionId)
             }
-            
-            println("REWARD STEP 3: counterAcquired=$counterAcquired")
-
-            /*
-            * 8. 실제 Resource 하나 확보
-            *
-            * 예:
-            * pizza-coupon
-            *
-            * READY 상태의 Resource 하나를 찾아
-            * ASSIGNED로 원자적으로 변경
-            */
-            assignedResource =
+            return rewardUnitOfWork.execute {
+                // 재시도는 새 트랜잭션이다. 기간/반복 정책도 다시 확인한다.
+                val now = clock.instant()
+                event.validateAvailable(now)
+                val latest = userActionRepositoryPort.findLatestByUserIdAndActionId(
+                    command.gameKey, command.eventKey, userId, action.actionId
+                )
+                ActionRepeatPolicy.validate(action, latest, now)
                 resourceRepositoryPort.assignReadyResource(
-                    gameKey = command.gameKey,
-                    eventKey = command.eventKey,
-                    itemKey = itemReward.itemKey,
-                    userId = userId
+                    command.gameKey, command.eventKey, itemReward.itemKey, userId
+                ) ?: throw ResourceNotAvailableException(itemReward.itemKey)
+                val updatedPoint = userPointRepositoryPort.spendIfEnough(
+                    command.gameKey, command.eventKey, userId, pointDefinition.pointKey, pointCost
+                ) ?: throw InsufficientPointException(
+                    pointDefinition.pointKey, pointCost,
+                    userPointRepositoryPort.findByUserIdAndPointKey(
+                        command.gameKey, command.eventKey, userId, pointDefinition.pointKey
+                    )?.currentPoint ?: 0
                 )
-                
-            println("REWARD STEP 4: assignedResource=$assignedResource")
-
-            if (assignedResource == null) {
-                throw ResourceNotAvailableException(
-                    itemReward.itemKey
-                )
-            }
-
-            /*
-            * 9. Point 차감 저장
-            */
-            val updatedPoint = userPointRepositoryPort.spendIfEnough(
-                gameKey = command.gameKey,
-                eventKey = command.eventKey,
-                userId = userId,
-                pointKey = pointDefinition.pointKey,
-                amount = pointCost
-            ) ?: throw InsufficientPointException(
-                pointKey = pointDefinition.pointKey,
-                required = pointCost,
-                current = userPointRepositoryPort.findByUserIdAndPointKey(
-                    command.gameKey, command.eventKey, userId, pointDefinition.pointKey
-                )?.currentPoint ?: 0
-            )
-            
-            println("REWARD STEP 5: point saved")
-
-            /*
-            * 10. Reward 완료 UserAction 저장
-            */
-            val userAction =
-                UserAction(
+                userActionRepositoryPort.save(command.gameKey, UserAction(
                     eventKey = command.eventKey,
                     userId = userId,
                     actionId = action.actionId,
                     action = ActionSnapshot.from(action),
                     status = ActionStatus.COMPLETE,
-                    progress = null,
                     checkedAt = now
-                )
-
-            userActionRepositoryPort.save(
-                command.gameKey,
-                userAction
-            )
-            
-            println("REWARD STEP 6: userAction saved")
-
-            /*
-            * 11. 정상 완료
-            */
-            return ExecuteActionResult(
-                actionId = action.actionId,
-                status = ActionStatus.COMPLETE,
-                currentProgress = pointCost,
-                goal = pointCost,
-                points = listOf(updatedPoint)
-            )
-
+                ))
+                ExecuteActionResult(action.actionId, ActionStatus.COMPLETE, pointCost, pointCost, listOf(updatedPoint))
+            }
+        } catch (exception: RewardCommitUncertainException) {
+            // 성공했을 수도 있다. 카운터를 반환하면 실제 재고보다 더 지급할 수 있다.
+            logger.error("Reward outcome uncertain; reconcile counter={}, userId={}", counterKey, userId, exception)
+            throw exception
         } catch (exception: Exception) {
-
-            /*
-            * Resource까지 확보했는데
-            * 그 이후 처리가 실패했다면
-            * Resource를 READY 상태로 되돌린다.
-            */
-            assignedResource?.id?.let { resourceId ->
-
-                resourceRepositoryPort.release(
-                    gameKey = command.gameKey,
-                    eventKey = command.eventKey,
-                    resourceId = resourceId
-                )
-            }
-
-            /*
-            * Counter 자리를 확보했는데
-            * Reward가 최종적으로 실패했다면
-            * Counter도 한 자리 반환
-            */
+            // MongoDB 변경은 트랜잭션이 롤백한다. 자원을 별도로 READY로 덮어쓰지 않는다.
             if (counterAcquired) {
-
-                rewardCounterPort.release(
-                    counterKey
-                )
+                try {
+                    rewardCounterPort.release(counterKey)
+                } catch (releaseFailure: Exception) {
+                    exception.addSuppressed(releaseFailure)
+                    logger.error("Reward counter release failed; reconcile counter={}", counterKey, releaseFailure)
+                }
             }
-
             throw exception
         }
     }

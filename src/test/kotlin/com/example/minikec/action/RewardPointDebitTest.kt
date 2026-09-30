@@ -38,7 +38,7 @@ class RewardPointDebitTest {
         `when`(points.findByUserIdAndPointKey("g", "e", "u", "ticket")).thenReturn(point)
         `when`(counter.tryAcquire(counterKey, 10)).thenReturn(true)
         `when`(resources.assignReadyResource("g", "e", "coupon", "u")).thenReturn(Resource(id = "r", eventKey = "e", itemKey = "coupon", key = "code"))
-        return ExecuteActionService(events, users, actions, points, lock, counter, resources, Clock.systemUTC())
+        return ExecuteActionService(events, users, actions, points, lock, counter, resources, Clock.systemUTC(), DirectRewardUnitOfWork, DirectMissionUnitOfWork)
     }
 
     @Test fun `reward returns atomic debit result rather than stale calculated balance`() {
@@ -59,9 +59,9 @@ class RewardPointDebitTest {
         `when`(points.spendIfEnough("g", "e", "u", "ticket", 3)).thenReturn(null)
         val failure = assertThrows(InsufficientPointException::class.java) { service.execute(command) }
         assertEquals(1L, failure.current)
-        verify(resources).release("g", "e", "r")
+        verify(resources, never()).release("g", "e", "r")
         verify(counter).release(counterKey)
-        verify(actions).findLatestByUserIdAndActionId("g", "e", "u", "reward")
+        verify(actions, times(2)).findLatestByUserIdAndActionId("g", "e", "u", "reward")
         verifyNoMoreInteractions(actions)
     }
 }

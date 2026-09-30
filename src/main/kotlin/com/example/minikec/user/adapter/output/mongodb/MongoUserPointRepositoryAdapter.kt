@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component
 import org.springframework.dao.DuplicateKeyException
 import org.springframework.data.mongodb.core.FindAndModifyOptions
 import org.springframework.data.mongodb.core.query.Update
+import org.springframework.transaction.support.TransactionSynchronizationManager
 
 @Component
 class MongoUserPointRepositoryAdapter(
@@ -43,6 +44,8 @@ class MongoUserPointRepositoryAdapter(
             mongoTemplate.findAndModify(query, update,
                 FindAndModifyOptions.options().upsert(true).returnNew(true), UserPointDocument::class.java, collection)
         } catch (exception: DuplicateKeyException) {
+            // 트랜잭션 내 쓰기 오류는 전체 롤백에 맡긴다. 실패한 세션에서 재조회/갱신하지 않는다.
+            if (TransactionSynchronizationManager.isActualTransactionActive()) throw exception
             // 동일 포인트의 동시 최초 생성 경쟁에서 진 요청도 자신의 적립분을 반영한다.
             // 실패한 upsert는 적립되지 않았으므로, 이미 생성된 문서에만 다시 증가시킨다.
             mongoTemplate.findAndModify(query, update,
