@@ -30,5 +30,5 @@ MissionTransactionTest는 실제 MongoDB의 별도 임시 DB를 사용한다. Us
 ## 범위
 
 보상 자원과 Redis 카운터는 미션 트랜잭션에 포함되지 않는다. 미션 기능에서 사용하지 않기 때문이다.
-반복 정책 NONE/DAILY와 정상 User Lock 범위에서 재실행을 제한한다. INFINITE 미션에서 같은 논리적 요청이 재전송되는 것을 구분할 요청 ID/멱등성 기능은 아직 없다.
+반복 정책 NONE/DAILY와 정상 User Lock 범위에서 재실행을 제한한다. 후속 작업으로 선택적 requestId 기반 멱등성을 추가했다(mission-idempotency.md 참고). ID가 없는 요청에는 요청 단위 중복 방지가 적용되지 않는다.
 기존에 이미 발생한 완료 기록/포인트 누락 데이터는 자동 보정하지 않는다. 기존 DB에 수동 마이그레이션을 실행하지 않았다.

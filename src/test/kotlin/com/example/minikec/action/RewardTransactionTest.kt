@@ -83,7 +83,7 @@ class RewardTransactionTest {
         return user
     }
     private fun service(repository: UserActionRepositoryPort = actions, work: RewardUnitOfWork = transactions) =
-        ExecuteActionService(events, users, repository, points, lock, counter, resources, Clock.systemUTC(), work, DirectMissionUnitOfWork)
+        ExecuteActionService(events, users, repository, points, lock, counter, resources, Clock.systemUTC(), work, DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java))
     private fun command(external: String = "external") = ExecuteActionCommand("g", "e", "reward", external)
     private fun balance(user: User) = points.findByUserIdAndPointKey("g", "e", user.id!!, "ticket")!!.currentPoint
     private fun resource() = template.findById("resource", ResourceDocument::class.java, resourceCollection)!!

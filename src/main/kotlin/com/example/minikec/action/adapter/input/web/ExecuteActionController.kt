@@ -31,7 +31,8 @@ class ExecuteActionController(
                     gameKey = gameKey,
                     eventKey = eventKey,
                     actionId = actionId,
-                    externalUserId = request.externalUserId
+                    externalUserId = request.externalUserId,
+                    requestId = request.requestId
                 )
             )
 

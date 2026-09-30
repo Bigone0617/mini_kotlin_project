@@ -14,7 +14,8 @@ data class ExecuteActionCommand(
     val gameKey: String,
     val eventKey: String,
     val actionId: String,
-    val externalUserId: String
+    val externalUserId: String,
+    val requestId: String? = null
 )
 
 data class ExecuteActionResult(

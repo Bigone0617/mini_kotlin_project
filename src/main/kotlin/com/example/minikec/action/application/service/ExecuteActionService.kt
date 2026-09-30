@@ -26,6 +26,9 @@ import com.example.minikec.action.application.port.output.MissionUnitOfWork
 import com.example.minikec.action.application.port.output.RewardUnitOfWork
 import com.example.minikec.action.domain.RewardCommitUncertainException
 import org.slf4j.LoggerFactory
+import org.springframework.dao.DuplicateKeyException
+import com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort
+import com.example.minikec.action.domain.InvalidActionRequestException
 
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -42,13 +45,19 @@ class ExecuteActionService(
     private val resourceRepositoryPort: ResourceRepositoryPort,
     private val clock: Clock,
     private val rewardUnitOfWork: RewardUnitOfWork,
-    private val missionUnitOfWork: MissionUnitOfWork
+    private val missionUnitOfWork: MissionUnitOfWork,
+    private val missionExecutions: MissionExecutionRepositoryPort
 ) : ExecuteActionUseCase {
     private val logger = LoggerFactory.getLogger(javaClass)
 
     override fun execute(
         command: ExecuteActionCommand
     ): ExecuteActionResult {
+        command.requestId?.let {
+            if (it.isBlank() || it.length > 128) {
+                throw InvalidActionRequestException("requestId must be nonblank and at most 128 characters")
+            }
+        }
 
         /*
          * 1. Event 조회
@@ -67,7 +76,9 @@ class ExecuteActionService(
             "Game key mismatch"
         }
 
-        event.validateAvailable(clock.instant())
+        // 요청 ID가 없는 기존 호출의 검증 순서는 유지한다.
+        // ID가 있으면 저장된 응답을 먼저 확인하여 이벤트 종료 후에도 재전송에 응답한다.
+        if (command.requestId == null) event.validateAvailable(clock.instant())
 
         /*
          * 3. 이벤트에 참여한 User 조회
@@ -116,11 +127,15 @@ class ExecuteActionService(
          */
         val action =
             event.findAction(command.actionId)
+        if (command.requestId != null && action.actionType != ActionType.MISSION) {
+            throw InvalidActionRequestException("requestId currently supports MISSION actions only")
+        }
             
         val lockKey =
             "user-lock:${command.gameKey}:${command.eventKey}:$userId"
 
         return userLockPort.withLock(lockKey) {
+            previousMissionResult(command, userId)?.let { return@withLock it }
             /*
             * 이번 Action 실행의 기준 시간
             */
@@ -167,15 +182,31 @@ class ExecuteActionService(
 
                 ActionType.MISSION -> {
                     missionUnitOfWork.prepare(command.gameKey, command.eventKey)
-                    missionUnitOfWork.execute {
-                        // 재시도마다 새 시각과 DB 상태를 기준으로 판단한다.
-                        val missionNow = clock.instant()
-                        event.validateAvailable(missionNow)
-                        val latest = userActionRepositoryPort.findLatestByUserIdAndActionId(
-                            command.gameKey, command.eventKey, userId, action.actionId
-                        )
-                        ActionRepeatPolicy.validate(action, latest, missionNow)
-                        executeMission(command, action, userId, latest, missionNow)
+                    try {
+                        missionUnitOfWork.execute {
+                            val previous = previousMissionResult(command, userId)
+                            if (previous != null) previous else {
+                                val missionNow = clock.instant()
+                                event.validateAvailable(missionNow)
+                                val latest = userActionRepositoryPort.findLatestByUserIdAndActionId(
+                                    command.gameKey, command.eventKey, userId, action.actionId
+                                )
+                                ActionRepeatPolicy.validate(action, latest, missionNow)
+                                val result = executeMission(command, action, userId, latest, missionNow)
+                                command.requestId?.let { requestId ->
+                                    try {
+                                        // 완료 기록/포인트와 결과 기록을 같은 트랜잭션에 저장한다.
+                                        missionExecutions.insert(command.gameKey, command.eventKey, userId, action.actionId, requestId, result)
+                                    } catch (exception: DuplicateKeyException) {
+                                        throw DuplicateMissionRequest(exception)
+                                    }
+                                }
+                                result
+                            }
+                        }
+                    } catch (exception: DuplicateMissionRequest) {
+                        // 경쟁에서 진 요청의 변경을 롤백한 뒤, 먼저 커밋된 결과를 반환한다.
+                        previousMissionResult(command, userId) ?: throw exception.original
                     }
                 }
 
@@ -196,6 +227,13 @@ class ExecuteActionService(
             }
         }
     }
+
+    private fun previousMissionResult(command: ExecuteActionCommand, userId: String): ExecuteActionResult? {
+        val requestId = command.requestId ?: return null
+        return missionExecutions.find(command.gameKey, command.eventKey, userId, command.actionId, requestId)
+    }
+
+    private class DuplicateMissionRequest(val original: DuplicateKeyException) : RuntimeException(original)
 
     /*
      * MISSION Action 실행

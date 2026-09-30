@@ -16,6 +16,10 @@ class MongoMissionUnitOfWork(
 ) : MissionUnitOfWork {
     override fun prepare(gameKey: String, eventKey: String) {
         transactions.prepare(gameKey, eventKey)
+        template.indexOps(names.missionExecution(gameKey, eventKey)).createIndex(
+            Index().on("userId", Sort.Direction.ASC).on("actionId", Sort.Direction.ASC)
+                .on("requestId", Sort.Direction.ASC).unique().named("uk_mission_request")
+        )
         template.indexOps(names.userAction(gameKey, eventKey)).createIndex(
             Index().on("userId", Sort.Direction.ASC).on("actionId", Sort.Direction.ASC)
                 .on("createdAt", Sort.Direction.DESC)

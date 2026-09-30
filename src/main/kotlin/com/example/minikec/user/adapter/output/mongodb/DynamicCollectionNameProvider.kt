@@ -5,6 +5,8 @@ import org.springframework.stereotype.Component
 @Component
 class DynamicCollectionNameProvider {
 
+    fun missionExecution(gameKey: String, eventKey: String): String = "${gameKey}_${eventKey}_missionExecution"
+
     fun user(
         gameKey: String,
         eventKey: String

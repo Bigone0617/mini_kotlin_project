@@ -38,7 +38,7 @@ class RewardPointDebitTest {
         `when`(points.findByUserIdAndPointKey("g", "e", "u", "ticket")).thenReturn(point)
         `when`(counter.tryAcquire(counterKey, 10)).thenReturn(true)
         `when`(resources.assignReadyResource("g", "e", "coupon", "u")).thenReturn(Resource(id = "r", eventKey = "e", itemKey = "coupon", key = "code"))
-        return ExecuteActionService(events, users, actions, points, lock, counter, resources, Clock.systemUTC(), DirectRewardUnitOfWork, DirectMissionUnitOfWork)
+        return ExecuteActionService(events, users, actions, points, lock, counter, resources, Clock.systemUTC(), DirectRewardUnitOfWork, DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java))
     }
 
     @Test fun `reward returns atomic debit result rather than stale calculated balance`() {
