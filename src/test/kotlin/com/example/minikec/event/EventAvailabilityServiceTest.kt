@@ -48,7 +48,7 @@ class EventAvailabilityServiceTest {
     @ParameterizedTest @EnumSource(EventUnavailableReason::class)
     fun `action rejection performs no persistence or redis operations`(reason: EventUnavailableReason) {
         `when`(events.findByEventKey("e")).thenReturn(event(reason))
-        val service = ExecuteActionService(events, users, actions, points, lock, counter, resources, clock, com.example.minikec.action.DirectRewardUnitOfWork, com.example.minikec.action.DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java))
+        val service = ExecuteActionService(events, users, actions, points, lock, counter, resources, clock, com.example.minikec.action.DirectRewardUnitOfWork, com.example.minikec.action.DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java), org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.RewardExecutionRepositoryPort::class.java))
         val error = assertThrows(EventUnavailableException::class.java) {
             service.execute(ExecuteActionCommand("g", "e", "a", "external"))
         }
@@ -74,7 +74,7 @@ class EventAvailabilityServiceTest {
         val immediateLock = object : UserLockPort {
             override fun <T> withLock(lockKey: String, action: () -> T): T = action()
         }
-        val service = ExecuteActionService(events, users, actions, points, immediateLock, counter, resources, changingClock, com.example.minikec.action.DirectRewardUnitOfWork, com.example.minikec.action.DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java))
+        val service = ExecuteActionService(events, users, actions, points, immediateLock, counter, resources, changingClock, com.example.minikec.action.DirectRewardUnitOfWork, com.example.minikec.action.DirectMissionUnitOfWork, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort::class.java), org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.RewardExecutionRepositoryPort::class.java))
         val error = assertThrows(EventUnavailableException::class.java) {
             service.execute(ExecuteActionCommand("g", "e", "a", "external"))
         }

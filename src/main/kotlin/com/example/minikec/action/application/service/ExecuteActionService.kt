@@ -29,6 +29,9 @@ import org.slf4j.LoggerFactory
 import org.springframework.dao.DuplicateKeyException
 import com.example.minikec.action.application.port.output.MissionExecutionRepositoryPort
 import com.example.minikec.action.domain.InvalidActionRequestException
+import com.example.minikec.action.domain.RewardRequestPendingException
+import com.example.minikec.action.application.port.output.RewardExecutionRepositoryPort
+import com.example.minikec.action.application.port.output.RewardRequestKey
 
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -46,7 +49,8 @@ class ExecuteActionService(
     private val clock: Clock,
     private val rewardUnitOfWork: RewardUnitOfWork,
     private val missionUnitOfWork: MissionUnitOfWork,
-    private val missionExecutions: MissionExecutionRepositoryPort
+    private val missionExecutions: MissionExecutionRepositoryPort,
+    private val rewardExecutions: RewardExecutionRepositoryPort
 ) : ExecuteActionUseCase {
     private val logger = LoggerFactory.getLogger(javaClass)
 
@@ -127,15 +131,19 @@ class ExecuteActionService(
          */
         val action =
             event.findAction(command.actionId)
-        if (command.requestId != null && action.actionType != ActionType.MISSION) {
-            throw InvalidActionRequestException("requestId currently supports MISSION actions only")
+        if (command.requestId != null && action.actionType !in setOf(ActionType.MISSION, ActionType.REWARD)) {
+            throw InvalidActionRequestException("requestId supports MISSION and REWARD actions only")
         }
             
         val lockKey =
             "user-lock:${command.gameKey}:${command.eventKey}:$userId"
 
         return userLockPort.withLock(lockKey) {
-            previousMissionResult(command, userId)?.let { return@withLock it }
+            when (action.actionType) {
+                ActionType.MISSION -> previousMissionResult(command, userId)
+                ActionType.REWARD -> previousRewardResult(command, userId)
+                else -> null
+            }?.let { return@withLock it }
             /*
             * 이번 Action 실행의 기준 시간
             */
@@ -231,6 +239,15 @@ class ExecuteActionService(
     private fun previousMissionResult(command: ExecuteActionCommand, userId: String): ExecuteActionResult? {
         val requestId = command.requestId ?: return null
         return missionExecutions.find(command.gameKey, command.eventKey, userId, command.actionId, requestId)
+    }
+
+    private fun rewardRequestKey(command: ExecuteActionCommand, userId: String): RewardRequestKey? =
+        command.requestId?.let { RewardRequestKey(command.gameKey, command.eventKey, userId, command.actionId, it) }
+
+    private fun previousRewardResult(command: ExecuteActionCommand, userId: String): ExecuteActionResult? {
+        val key = rewardRequestKey(command, userId) ?: return null
+        val execution = rewardExecutions.find(key) ?: return null
+        return execution.result ?: throw RewardRequestPendingException()
     }
 
     private class DuplicateMissionRequest(val original: DuplicateKeyException) : RuntimeException(original)
@@ -351,10 +368,18 @@ class ExecuteActionService(
 
         rewardUnitOfWork.prepare(command.gameKey, command.eventKey)
         val counterKey = "reward-count:${command.gameKey}:${command.eventKey}:${action.actionId}"
+        val requestKey = rewardRequestKey(command, userId)
+        // 재고 예약 전에 요청을 선점한다. 선점은 DB 트랜잭션 재시도에 포함하지 않는다.
+        if (requestKey != null && !rewardExecutions.tryClaim(requestKey)) {
+            return previousRewardResult(command, userId) ?: throw RewardRequestPendingException()
+        }
         var counterAcquired = false
+        var counterOutcomeKnown = true
         try {
             action.totalCount?.let { maxCount ->
+                counterOutcomeKnown = false
                 counterAcquired = rewardCounterPort.tryAcquire(counterKey, maxCount)
+                counterOutcomeKnown = true
                 if (!counterAcquired) throw RewardSoldOutException(action.actionId)
             }
             return rewardUnitOfWork.execute {
@@ -384,7 +409,10 @@ class ExecuteActionService(
                     status = ActionStatus.COMPLETE,
                     checkedAt = now
                 ))
-                ExecuteActionResult(action.actionId, ActionStatus.COMPLETE, pointCost, pointCost, listOf(updatedPoint))
+                val result = ExecuteActionResult(action.actionId, ActionStatus.COMPLETE, pointCost, pointCost, listOf(updatedPoint))
+                // 차감/자원 할당/완료 기록과 결과 저장이 함께 커밋되거나 롤백된다.
+                requestKey?.let { rewardExecutions.complete(it, result) }
+                result
             }
         } catch (exception: RewardCommitUncertainException) {
             // 성공했을 수도 있다. 카운터를 반환하면 실제 재고보다 더 지급할 수 있다.
@@ -392,13 +420,25 @@ class ExecuteActionService(
             throw exception
         } catch (exception: Exception) {
             // MongoDB 변경은 트랜잭션이 롤백한다. 자원을 별도로 READY로 덮어쓰지 않는다.
+            var retrySafe = counterOutcomeKnown
             if (counterAcquired) {
                 try {
                     rewardCounterPort.release(counterKey)
                 } catch (releaseFailure: Exception) {
+                    retrySafe = false
                     exception.addSuppressed(releaseFailure)
                     logger.error("Reward counter release failed; reconcile counter={}", counterKey, releaseFailure)
                 }
+            }
+            if (requestKey != null && retrySafe) {
+                try {
+                    rewardExecutions.deletePending(requestKey)
+                } catch (cleanupFailure: Exception) {
+                    exception.addSuppressed(cleanupFailure)
+                    logger.error("Reward request cleanup failed; reconcile request={}", requestKey, cleanupFailure)
+                }
+            } else if (requestKey != null) {
+                logger.error("Reward counter outcome uncertain; preserve pending request={}", requestKey, exception)
             }
             throw exception
         }

@@ -1,5 +1,6 @@
 package com.example.minikec.common.adapter.input.web.exception
 
+import com.example.minikec.action.domain.RewardRequestPendingException
 import com.example.minikec.action.domain.InvalidActionRequestException
 import com.example.minikec.event.domain.EventUnavailableException
 import com.example.minikec.user.domain.InsufficientPointException
@@ -16,6 +17,12 @@ import org.springframework.web.bind.annotation.RestControllerAdvice
 
 @RestControllerAdvice
 class GlobalExceptionHandler {
+    @ExceptionHandler(RewardRequestPendingException::class)
+    fun handleRewardRequestPending(exception: RewardRequestPendingException): ResponseEntity<ErrorResponse> =
+        ResponseEntity.status(HttpStatus.CONFLICT).body(
+            ErrorResponse(code = "REWARD_REQUEST_PENDING", message = exception.message ?: "Reward request is pending")
+        )
+
     @ExceptionHandler(InvalidActionRequestException::class)
     fun handleInvalidActionRequest(exception: InvalidActionRequestException): ResponseEntity<ErrorResponse> =
         ResponseEntity.status(HttpStatus.BAD_REQUEST).body(

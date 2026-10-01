@@ -4,8 +4,8 @@
 
 1. User Lock 안에서 이벤트, 반복 정책, 포인트, 보상 설정을 검사한다.
 2. 트랜잭션 밖에서 포인트/실행 기록/자원 컬렉션과 필요한 인덱스를 준비한다.
-3. 수량 제한이 있으면 Redis 카운터 자리를 한 번 확보한다.
-4. MongoDB 트랜잭션에서 기간과 반복 정책 재검사 → Resource 할당 → 조건부 포인트 차감 → UserAction 완료 기록을 수행한다.
+3. requestId가 있으면 요청을 PENDING으로 선점한다. 수량 제한이 있으면 Redis 카운터 자리를 한 번 확보한다.
+4. MongoDB 트랜잭션에서 기간과 반복 정책 재검사 → Resource 할당 → 조건부 포인트 차감 → UserAction 완료 기록 → 요청 결과 저장(COMPLETED)을 수행한다.
 5. 커밋 성공 후 결과를 반환한다. 성공한 보상의 Redis 카운트는 유지한다.
 
 `MongoRewardUnitOfWork`는 기존 `MongoParticipationUnitOfWork.execute`의 MongoDB 트랜잭션/재시도 로직을 재사용한다. 콜백에는 MongoDB 작업만 포함된다. 쓰기 충돌로 재시도해도 Redis 확보가 반복되지 않는다.
@@ -35,5 +35,5 @@ MINIKEC_MONGO_TEST_URI='mongodb://localhost:27017/?replicaSet=rs0' ./gradlew tes
 ## 남은 한계와 복구
 
 MongoDB와 Redis 사이의 분산 트랜잭션은 아니다. 카운터 확보 뒤 프로세스가 강제 종료되거나 Redis의 응답이 유실되면 예약 수량이 남을 수 있다.
-로그에 남는 counterKey, userId와 UserAction/Resource를 확인하여 보상 성공 여부를 판단해야 한다. 특히 무한 반복 보상은 별도 실행 ID/예약 이력이 없어 자동 판별이 충분하지 않다. 영속적인 지급 ID/예약 이력 및 재정합 작업은 아직 구현하지 않았다.
+requestId가 있는 요청은 영속적인 요청 선점/결과 기록을 사용한다([리워드 멱등성](reward-idempotency.md)). 결과가 불명확하면 PENDING을 유지하여 자동 재실행을 막는다. PENDING만으로 Redis 예약 여부를 판단할 수는 없으며 자동 재정합은 아직 구현하지 않았다. ID 없는 요청에는 이 보호가 적용되지 않는다.
 기존에 발생한 포인트 손실/카운터 불일치 데이터는 자동 수정하지 않는다.

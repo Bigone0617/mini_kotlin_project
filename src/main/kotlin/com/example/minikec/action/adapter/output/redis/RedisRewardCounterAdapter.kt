@@ -50,18 +50,18 @@ class RedisRewardCounterAdapter(
                 maxCount.toString()
             )
 
-        return result != null && result >= 0
+        return requireNotNull(result) { "Reward counter acquisition outcome is unknown" } >= 0
     }
 
     override fun release(
         key: String
     ) {
 
-        StringRedisScriptSupport.execute(
+        requireNotNull(StringRedisScriptSupport.execute(
             redisTemplate,
             releaseScript,
             key
-        )
+        )) { "Reward counter release outcome is unknown" }
     }
 
     override fun getCount(

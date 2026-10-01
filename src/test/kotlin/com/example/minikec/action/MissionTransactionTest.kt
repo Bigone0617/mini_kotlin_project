@@ -75,7 +75,7 @@ class MissionTransactionTest {
         userLock: UserLockPort = lock,
         work: MissionUnitOfWork = transactions,
         executionPort: MissionExecutionRepositoryPort = executions
-    ) = ExecuteActionService(events, users, actions, repository, userLock, counter, resources, time, DirectRewardUnitOfWork, work, executionPort)
+    ) = ExecuteActionService(events, users, actions, repository, userLock, counter, resources, time, DirectRewardUnitOfWork, work, executionPort, org.mockito.Mockito.mock(com.example.minikec.action.application.port.output.RewardExecutionRepositoryPort::class.java))
     private fun balance(user: User, key: String = "ticket") = points.findByUserIdAndPointKey("g", "e", user.id!!, key)?.currentPoint
     private fun count() = template.getCollection(names.userAction("g", "e")).countDocuments()
     private fun failSecond(): UserPointRepositoryPort = object : UserPointRepositoryPort by points {
@@ -288,9 +288,9 @@ class MissionTransactionTest {
         verifyNoInteractions(events, counter, resources)
     }
 
-    @Test fun `request IDs on reward actions are explicitly rejected`() {
+    @Test fun `request IDs on unsupported action types are explicitly rejected`() {
         prepare()
-        val reward = Action("mission", "reward", ActionType.REWARD, ActionSubType.INSTANT_REWARD)
+        val reward = Action("mission", "reward", ActionType.MINI_GAME, ActionSubType.INSTANT_REWARD)
         `when`(events.findByEventKey("e")).thenReturn(Event("e", "g", "event", active = true,
             rewardGroups = listOf(ActionGroup("rewards", "rewards", actions = listOf(reward)))))
         assertThrows(com.example.minikec.action.domain.InvalidActionRequestException::class.java) {

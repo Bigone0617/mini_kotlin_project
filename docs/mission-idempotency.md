@@ -13,7 +13,7 @@ Content-Type: application/json
 - 새 실행에는 새 ID를 사용한다. 새 ID라도 NONE/DAILY 같은 기존 반복 정책은 적용된다.
 - requestId는 선택 필드다. 없거나 null이면 기존 방식으로 실행하며 요청 단위 멱등성은 제공하지 않는다.
 - ID는 공백만으로 구성되면 안 되며 최대 128자다. 잘못된 ID는 HTTP 400 / INVALID_ACTION_REQUEST다.
-- 현재 MISSION만 지원한다. REWARD에 requestId를 보내면 보장 없는 처리를 조용히 수행하지 않고 HTTP 400을 반환한다.
+- MISSION과 REWARD에서 requestId를 지원한다. 리워드의 선점/불명확 결과 처리 방식은 [리워드 요청 멱등성](reward-idempotency.md)을 참고한다.
 
 ## 처리 흐름
 
@@ -45,4 +45,4 @@ MINIKEC_MONGO_TEST_URI='mongodb://localhost:27017/?replicaSet=rs0' ./gradlew tes
 
 ID 없는 요청과 이미 존재하던 실행 기록에는 소급 적용되지 않는다. 현재 실행 결과에는 만료 시간을 설정하지 않았으며, 이를 삭제하면 삭제된 ID의 재처리 방지 보장도 사라진다.
 구버전 서버는 requestId를 처리하지 않으므로 서버가 혼재한 배포 중에는 멱등성을 보장할 수 없다. 전체 서버 업데이트 후 클라이언트에서 이 기능을 사용해야 한다. 구버전으로 롤백해도 저장된 결과는 남지만 구버전이 조회하지 않으므로 재전송 보호는 사라진다.
-Redis 보상 카운터 복구와 REWARD 멱등성은 이번 작업에 포함되지 않는다. 인증 주체에 외부 사용자 ID를 연결하는 작업도 별도다.
+REWARD 멱등성은 별도로 구현했으며 Redis 보상 카운터 자동 복구는 아직 포함되지 않는다. 인증 주체에 외부 사용자 ID를 연결하는 작업도 별도다.

@@ -38,4 +38,16 @@ class ActionRequestHttpTest {
             .content("""{"externalUserId":"external","requestId":" "}"""))
             .andExpect(status().isBadRequest).andExpect(jsonPath("$.code").value("INVALID_ACTION_REQUEST"))
     }
+
+    @Test fun `pending reward request maps to conflict with stable error code`() {
+        val useCase = object : ExecuteActionUseCase {
+            override fun execute(command: ExecuteActionCommand): ExecuteActionResult =
+                throw com.example.minikec.action.domain.RewardRequestPendingException()
+        }
+        val mvc = MockMvcBuilders.standaloneSetup(ExecuteActionController(useCase))
+            .setControllerAdvice(GlobalExceptionHandler()).build()
+        mvc.perform(post("/ec/v1/g/events/e/actions/a").contentType(MediaType.APPLICATION_JSON)
+            .content("""{"externalUserId":"external","requestId":"pending"}"""))
+            .andExpect(status().isConflict).andExpect(jsonPath("$.code").value("REWARD_REQUEST_PENDING"))
+    }
 }
