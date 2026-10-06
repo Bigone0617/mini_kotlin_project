@@ -52,6 +52,19 @@ class RewardTransactionTest {
     private val releases = AtomicInteger()
     private var releaseFailure: RuntimeException? = null
     private val counter = object : RewardCounterPort {
+        private val reservations = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+        override fun reserve(key: String, token: String, maxCount: Long): Boolean = synchronized(reservations) {
+            reservations[token] ?: tryAcquire(key, maxCount).also { reservations[token] = it }
+        }
+        override fun releaseReservation(key: String, token: String) = synchronized(reservations) {
+            if (reservations[token] == true) { release(key); reservations[token] = false }
+        }
+        override fun reservationState(key: String, token: String) = when (reservations[token]) {
+            true -> ReservationState.RESERVED
+            false -> ReservationState.RELEASED
+            null -> ReservationState.MISSING
+        }
+
         override fun tryAcquire(key: String, maxCount: Long): Boolean {
             acquisitions.incrementAndGet()
             while (true) {
@@ -270,8 +283,8 @@ class RewardTransactionTest {
         val entered = CountDownLatch(1)
         val proceed = CountDownLatch(1)
         val paused = object : RewardCounterPort by counter {
-            override fun tryAcquire(key: String, maxCount: Long): Boolean {
-                val acquired = counter.tryAcquire(key, maxCount)
+            override fun reserve(key: String, token: String, maxCount: Long): Boolean {
+                val acquired = counter.reserve(key, token, maxCount)
                 entered.countDown()
                 check(proceed.await(20, TimeUnit.SECONDS))
                 return acquired
@@ -339,8 +352,8 @@ class RewardTransactionTest {
         prepare()
         val user = participant()
         val timeout = object : RewardCounterPort by counter {
-            override fun tryAcquire(key: String, maxCount: Long): Boolean {
-                counter.tryAcquire(key, maxCount)
+            override fun reserve(key: String, token: String, maxCount: Long): Boolean {
+                counter.reserve(key, token, maxCount)
                 throw IllegalStateException("lost Redis reply")
             }
         }
@@ -414,4 +427,101 @@ class RewardTransactionTest {
         assertEquals(8, count.get())
         assertEquals(1L, actionCount())
     }
+    @Test fun `confirmed rollback can recover failed release then retry same request once`() {
+        prepare()
+        val user = participant()
+        val key = RewardRequestKey("g", "e", user.id!!, "reward", "recover")
+        val request = command().copy(requestId = key.requestId)
+        val failing = object : UserActionRepositoryPort by actions {
+            override fun save(gameKey: String, userAction: UserAction): UserAction = throw IllegalStateException("write failed")
+        }
+        releaseFailure = IllegalStateException("Redis unavailable")
+        assertThrows(IllegalStateException::class.java) { service(repository = failing).execute(request) }
+        assertTrue(executions.find(key)!!.rollbackConfirmed)
+        assertEquals(10L, balance(user))
+        assertEquals(ResourceStatus.READY, resource().status)
+        releaseFailure = null
+        val recovery = com.example.minikec.action.application.service.RecoverRewardService(executions, counter, lock)
+        assertEquals(com.example.minikec.action.application.service.RewardRecoveryOutcome.RETRY_ALLOWED, recovery.recover(key))
+        assertEquals(0, count.get())
+        assertEquals(com.example.minikec.action.application.service.RewardRecoveryOutcome.NOT_FOUND, recovery.recover(key))
+        val result = service().execute(request)
+        assertEquals(result, service().execute(request))
+        assertEquals(7L, balance(user))
+        assertEquals(1, count.get())
+        assertEquals(1L, actionCount())
+        assertEquals(com.example.minikec.action.application.service.RewardRecoveryOutcome.COMPLETED, recovery.recover(key))
+    }
+
+    @Test fun `unknown commit without receipt cannot be recovered from unchanged balance`() {
+        prepare()
+        val user = participant()
+        val uncertain = object : RewardUnitOfWork by transactions {
+            override fun <T : Any> execute(action: () -> T): T =
+                throw RewardCommitUncertainException(IllegalStateException("outcome unknown"))
+        }
+        val key = RewardRequestKey("g", "e", user.id!!, "reward", "uncertain-recovery")
+        assertThrows(RewardCommitUncertainException::class.java) { service(work = uncertain).execute(command().copy(requestId = key.requestId)) }
+        val recovery = com.example.minikec.action.application.service.RecoverRewardService(executions, counter, lock)
+        assertEquals(com.example.minikec.action.application.service.RewardRecoveryOutcome.REVIEW_REQUIRED, recovery.recover(key))
+        assertEquals(1, count.get())
+        assertEquals(0, releases.get())
+        assertFalse(executions.find(key)!!.rollbackConfirmed)
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "MINIKEC_REDIS_TEST_HOST", matches = ".+")
+    fun `real Redis lost release reply recovers once and retry commits points resource and receipt`() {
+        prepare()
+        val user = participant()
+        val key = RewardRequestKey("g", "e", user.id!!, "reward", "real-redis")
+        val factory = org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory(
+            System.getenv("MINIKEC_REDIS_TEST_HOST"), System.getenv("MINIKEC_REDIS_TEST_PORT")?.toInt() ?: 6379)
+            .apply { afterPropertiesSet(); start() }
+        val redis = org.springframework.data.redis.core.StringRedisTemplate(factory)
+        val adapter = com.example.minikec.action.adapter.output.redis.RedisRewardCounterAdapter(redis)
+        // 이 테스트만의 Redis key를 사용한다. 실제 이벤트 counter와 격리한다.
+        val prefix = "mini-kec-integration:${UUID.randomUUID()}:"
+        val isolated = object : RewardCounterPort by adapter {
+            override fun reserve(key: String, token: String, maxCount: Long) = adapter.reserve(prefix + key, token, maxCount)
+            override fun releaseReservation(key: String, token: String) = adapter.releaseReservation(prefix + key, token)
+            override fun reservationState(key: String, token: String) = adapter.reservationState(prefix + key, token)
+            override fun getCount(key: String) = adapter.getCount(prefix + key)
+        }
+        val lostReply = object : RewardCounterPort by isolated {
+            override fun releaseReservation(key: String, token: String) {
+                isolated.releaseReservation(key, token)
+                throw IllegalStateException("release succeeded but reply lost")
+            }
+        }
+        val failing = object : UserActionRepositoryPort by actions {
+            override fun save(gameKey: String, userAction: UserAction): UserAction = throw IllegalStateException("write failed")
+        }
+        val counterKey = "reward-count:g:e:reward"
+        try {
+            assertThrows(IllegalStateException::class.java) {
+                service(repository = failing, counterPort = lostReply).execute(command().copy(requestId = key.requestId))
+            }
+            val receipt = requireNotNull(executions.find(key))
+            assertTrue(receipt.rollbackConfirmed)
+            assertEquals(10L, balance(user))
+            assertEquals(ResourceStatus.READY, resource().status)
+            assertEquals(0L, actionCount())
+            assertEquals(ReservationState.RELEASED, isolated.reservationState(counterKey, receipt.reservationToken!!))
+            assertEquals(0L, isolated.getCount(counterKey))
+            val recovery = com.example.minikec.action.application.service.RecoverRewardService(executions, isolated, lock)
+            assertEquals(com.example.minikec.action.application.service.RewardRecoveryOutcome.RETRY_ALLOWED, recovery.recover(key))
+            assertEquals(0L, isolated.getCount(counterKey))
+            val result = service(counterPort = isolated).execute(command().copy(requestId = key.requestId))
+            assertEquals(result, service(counterPort = isolated).execute(command().copy(requestId = key.requestId)))
+            assertEquals(7L, balance(user))
+            assertEquals(ResourceStatus.ASSIGNED, resource().status)
+            assertEquals(1L, actionCount())
+            assertEquals(1L, isolated.getCount(counterKey))
+        } finally {
+            try { redis.delete(listOf(prefix + counterKey, prefix + counterKey + ":reservations")) }
+            finally { factory.destroy() }
+        }
+    }
+
 }

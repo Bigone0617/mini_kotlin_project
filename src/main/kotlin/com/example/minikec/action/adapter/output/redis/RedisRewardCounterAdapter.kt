@@ -10,6 +10,55 @@ class RedisRewardCounterAdapter(
     private val redisTemplate: StringRedisTemplate
 ) : RewardCounterPort {
 
+    private val reserveScript = DefaultRedisScript("""
+        local state = redis.call('HGET', KEYS[2], ARGV[1])
+        if state == 'RESERVED' then return 1 end
+        if state == 'RELEASED' or state == 'REJECTED' then return 0 end
+        if state then return -1 end
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if not current or current < 0 or current ~= math.floor(current) then return -1 end
+        if current >= tonumber(ARGV[2]) then
+            redis.call('HSET', KEYS[2], ARGV[1], 'REJECTED')
+            return 0
+        end
+        redis.call('INCR', KEYS[1])
+        redis.call('HSET', KEYS[2], ARGV[1], 'RESERVED')
+        return 1
+    """.trimIndent(), Long::class.java)
+
+    private val releaseReservationScript = DefaultRedisScript("""
+        local state = redis.call('HGET', KEYS[2], ARGV[1])
+        if not state then return -1 end
+        if state == 'RELEASED' or state == 'REJECTED' then return 0 end
+        if state ~= 'RESERVED' then return -1 end
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if current <= 0 then return -1 end
+        redis.call('DECR', KEYS[1])
+        redis.call('HSET', KEYS[2], ARGV[1], 'RELEASED')
+        return 1
+    """.trimIndent(), Long::class.java)
+
+    override fun reserve(key: String, token: String, maxCount: Long): Boolean {
+        require(token.isNotBlank() && maxCount >= 0)
+        val result = requireNotNull(StringRedisScriptSupport.executeKeys(redisTemplate, reserveScript,
+            key, "$key:reservations", token, maxCount.toString())) { "Reservation outcome is unknown" }
+        check(result == 0L || result == 1L) { "Invalid reservation result" }
+        return result == 1L
+    }
+
+    override fun releaseReservation(key: String, token: String) {
+        require(token.isNotBlank())
+        val result = requireNotNull(StringRedisScriptSupport.executeKeys(redisTemplate, releaseReservationScript,
+            key, "$key:reservations", token)) { "Reservation release outcome is unknown" }
+        check(result == 0L || result == 1L) { "Reservation evidence missing or inconsistent" }
+    }
+
+    override fun reservationState(key: String, token: String): com.example.minikec.action.application.port.output.ReservationState {
+        val value = redisTemplate.opsForHash<String, String>().get("$key:reservations", token)
+        return value?.let { com.example.minikec.action.application.port.output.ReservationState.valueOf(it) }
+            ?: com.example.minikec.action.application.port.output.ReservationState.MISSING
+    }
+
     private val acquireScript = DefaultRedisScript(
         """
         local current = tonumber(redis.call('GET', KEYS[1]) or '0')

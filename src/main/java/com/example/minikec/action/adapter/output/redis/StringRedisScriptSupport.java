@@ -15,6 +15,10 @@ final class StringRedisScriptSupport {
 
     private StringRedisScriptSupport() {}
 
+    static @Nullable Long executeKeys(StringRedisTemplate template, RedisScript<Long> script, String first, String second, Object... args) {
+        return template.execute(script, List.of(first, second), args);
+    }
+
     static @Nullable Long execute(
         StringRedisTemplate redisTemplate,
         RedisScript<Long> script,

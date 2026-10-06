@@ -17,4 +17,12 @@ class RedisRewardCounterResultTest {
     @Test fun `missing release result is an unknown outcome`() {
         assertThrows(IllegalArgumentException::class.java) { adapter.release("counter") }
     }
+    @Test fun `missing reservation reply is unknown`() {
+        assertThrows(IllegalArgumentException::class.java) { adapter.reserve("counter", "token", 10) }
+    }
+
+    @Test fun `missing reservation release reply is unknown`() {
+        assertThrows(IllegalArgumentException::class.java) { adapter.releaseReservation("counter", "token") }
+    }
+
 }

@@ -32,7 +32,7 @@
         const now = Date.now();
         const row = (id, minutes, status = 'PENDING') => ({_id: id, userId: 'u', actionId: 'reward', requestId: id,
             status, createdAt: new Date(now - minutes * 60000), result: {secret: 'must-not-print'}});
-        collection.insertMany([row('oldest', 60), row('old', 20), row('recent', 1), row('completed', 60, 'COMPLETED'),
+        collection.insertMany([{...row('oldest', 60), counterKey: 'counter', reservationToken: 'token', rollbackConfirmed: true}, row('old', 20), row('recent', 1), row('completed', 60, 'COMPLETED'),
             {_id: 'missing-date', status: 'PENDING'}, {_id: 'invalid-date', status: 'PENDING', createdAt: '2020-01-01'}]);
         db.getCollection('g_other_rewardExecution').insertOne(row('other-event', 60));
         const before = EJSON.stringify(collection.find().sort({_id: 1}).toArray());
@@ -42,6 +42,8 @@
         check(report.returnedCount === 2 && report.requests.map(r => r.requestId).join(',') === 'oldest,old', 'age/status/scope/order filter');
         check(report.hasMore === false && !JSON.stringify(report).includes('must-not-print'), 'projection and complete report');
         check(report.assessment === 'REVIEW_REQUIRED_NOT_CONFIRMED_FAILURE', 'must not assert failed');
+        check(report.requests[0].counterKey === 'counter' && report.requests[0].reservationToken === 'token' && report.requests[0].rollbackConfirmed === true, 'reservation metadata');
+        check(report.requests[1].reservationToken === null && report.requests[1].rollbackConfirmed === false, 'legacy records require evidence');
         passed++;
 
         process.env.KEC_PENDING_LIMIT = '1';

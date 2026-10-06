@@ -21,7 +21,19 @@ class MongoRewardExecutionRepositoryAdapter(
     private fun collection(key: RewardRequestKey) = names.rewardExecution(key.gameKey, key.eventKey)
 
     override fun find(key: RewardRequestKey): RewardExecution? =
-        template.findOne(query(key), RewardExecutionDocument::class.java, collection(key))?.let { RewardExecution(it.result) }
+        template.findOne(query(key), RewardExecutionDocument::class.java, collection(key))?.let { RewardExecution(it.result, it.counterKey, it.reservationToken, it.rollbackConfirmed) }
+
+    override fun attachReservation(key: RewardRequestKey, counterKey: String, token: String) {
+        val updated = template.updateFirst(query(key).addCriteria(Criteria.where("status").`is`("PENDING")),
+            Update().set("counterKey", counterKey).set("reservationToken", token), RewardExecutionDocument::class.java, collection(key))
+        check(updated.matchedCount == 1L) { "Pending reward request must exist" }
+    }
+
+    override fun confirmRollback(key: RewardRequestKey) {
+        val updated = template.updateFirst(query(key).addCriteria(Criteria.where("status").`is`("PENDING")),
+            Update().set("rollbackConfirmed", true), RewardExecutionDocument::class.java, collection(key))
+        check(updated.matchedCount == 1L) { "Pending reward request must exist" }
+    }
 
     override fun tryClaim(key: RewardRequestKey): Boolean = try {
         template.insert(RewardExecutionDocument(key.userId, key.actionId, key.requestId), collection(key))
@@ -38,6 +50,11 @@ class MongoRewardExecutionRepositoryAdapter(
         check(updated.matchedCount == 1L) { "Pending reward request must exist" }
     }
 
+    override fun deleteRolledBack(key: RewardRequestKey, token: String): Boolean =
+        template.remove(query(key).addCriteria(Criteria.where("status").`is`("PENDING")
+            .and("rollbackConfirmed").`is`(true).and("reservationToken").`is`(token)),
+            RewardExecutionDocument::class.java, collection(key)).deletedCount == 1L
+
     override fun deletePending(key: RewardRequestKey) {
         template.remove(query(key).addCriteria(Criteria.where("status").`is`("PENDING")),
             RewardExecutionDocument::class.java, collection(key))
@@ -50,5 +67,8 @@ data class RewardExecutionDocument(
     val requestId: String,
     val status: String = "PENDING",
     val result: ExecuteActionResult? = null,
+    val counterKey: String? = null,
+    val reservationToken: String? = null,
+    val rollbackConfirmed: Boolean = false,
     val createdAt: Instant = Instant.now()
 )

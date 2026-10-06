@@ -33,7 +33,7 @@
     // No writes, index creation, TTL changes, Redis calls or automatic retries.
     const records = db.getCollection(collectionName).find(
         {status: 'PENDING', createdAt: {$type: 'date', $lte: cutoff}},
-        {_id: 1, userId: 1, actionId: 1, requestId: 1, createdAt: 1}
+        {_id: 1, userId: 1, actionId: 1, requestId: 1, createdAt: 1, counterKey: 1, reservationToken: 1, rollbackConfirmed: 1}
     ).sort({createdAt: 1, _id: 1}).limit(limit + 1).maxTimeMS(maxTimeMS).toArray();
     print(JSON.stringify({
         database: db.getName(), collection: collectionName,
@@ -45,7 +45,8 @@
         warning: 'Age does not prove failure or Redis reservation. Do not delete or release automatically. Missing or invalid createdAt values are excluded.',
         requests: records.slice(0, limit).map(record => ({
             id: String(record._id), userId: record.userId, actionId: record.actionId,
-            requestId: record.requestId, createdAt: record.createdAt.toISOString(),
+            requestId: record.requestId, counterKey: record.counterKey ?? null,
+            reservationToken: record.reservationToken ?? null, rollbackConfirmed: record.rollbackConfirmed === true, createdAt: record.createdAt.toISOString(),
             ageSeconds: Math.floor((observedAt.getTime() - record.createdAt.getTime()) / 1000)
         }))
     }));

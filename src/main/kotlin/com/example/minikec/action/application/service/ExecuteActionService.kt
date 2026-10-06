@@ -373,12 +373,15 @@ class ExecuteActionService(
         if (requestKey != null && !rewardExecutions.tryClaim(requestKey)) {
             return previousRewardResult(command, userId) ?: throw RewardRequestPendingException()
         }
+        val reservationToken = if (requestKey != null && action.totalCount != null) java.util.UUID.randomUUID().toString() else null
         var counterAcquired = false
         var counterOutcomeKnown = true
         try {
+            reservationToken?.let { rewardExecutions.attachReservation(requireNotNull(requestKey), counterKey, it) }
             action.totalCount?.let { maxCount ->
                 counterOutcomeKnown = false
-                counterAcquired = rewardCounterPort.tryAcquire(counterKey, maxCount)
+                counterAcquired = if (reservationToken != null) rewardCounterPort.reserve(counterKey, reservationToken, maxCount)
+                    else rewardCounterPort.tryAcquire(counterKey, maxCount)
                 counterOutcomeKnown = true
                 if (!counterAcquired) throw RewardSoldOutException(action.actionId)
             }
@@ -421,9 +424,18 @@ class ExecuteActionService(
         } catch (exception: Exception) {
             // MongoDB 변경은 트랜잭션이 롤백한다. 자원을 별도로 READY로 덮어쓰지 않는다.
             var retrySafe = counterOutcomeKnown
+            // 이 분기는 커밋 불명확 예외를 제외한다. 진행 중 요청을 시간만으로 복구하지 않는다.
+            if (requestKey != null) {
+                try { rewardExecutions.confirmRollback(requestKey) }
+                catch (markFailure: Exception) {
+                    exception.addSuppressed(markFailure)
+                    retrySafe = false
+                }
+            }
             if (counterAcquired) {
                 try {
-                    rewardCounterPort.release(counterKey)
+                    if (reservationToken != null) rewardCounterPort.releaseReservation(counterKey, reservationToken)
+                    else rewardCounterPort.release(counterKey)
                 } catch (releaseFailure: Exception) {
                     retrySafe = false
                     exception.addSuppressed(releaseFailure)
